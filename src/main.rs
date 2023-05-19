@@ -2,6 +2,8 @@
 extern crate log;
 
 mod config;
+#[cfg(test)]
+mod tests;
 mod window_manager;
 
 use std::collections::HashSet;
@@ -12,13 +14,13 @@ use std::thread::{sleep, spawn};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use config::Config;
 use lockfile::Lockfile;
 use once_cell::sync::Lazy;
-use signal_hook::consts::TERM_SIGNALS;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
-use window_manager::{Window, WindowManager};
+use window_manager::{Window, WindowManager, WM};
 
 /// Workspaces with style!
 ///
@@ -38,8 +40,17 @@ use window_manager::{Window, WindowManager};
 /// [other]
 /// deduplicate_icons = true
 #[derive(Parser, Debug)]
-#[clap(version, about)]
-struct Args;
+#[clap(version, about, long_about)]
+struct Args {
+    #[arg(short, long)]
+    enforce_window_manager: Option<EnforceWindowManager>,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum EnforceWindowManager {
+    SwayOrI3,
+    Hyprland,
+}
 
 static LOCK: Lazy<Mutex<Option<Lockfile>>> =
     Lazy::new(|| Mutex::new(Lockfile::create(lockfile_path()).ok()));
@@ -93,7 +104,8 @@ fn aquire_lock() {
     }
 
     // Drop the lock on exit
-    let mut signals = Signals::new(TERM_SIGNALS).expect("Failed to create signals iterator");
+    let mut signals = Signals::new([SIGTERM, SIGQUIT, SIGINT, SIGHUP])
+        .expect("Failed to create signals iterator");
     spawn(move || {
         let _ = signals.forever().next();
         drop(LOCK.lock().unwrap().take());
@@ -110,24 +122,26 @@ fn aquire_lock() {
 }
 
 fn run() -> Result<()> {
-    let mut wm = WindowManager::connect()?;
+    let args = Args::parse();
+    let mut wm = WindowManager::connect(args.enforce_window_manager)?;
     info!("Successfully connected to WM");
 
     loop {
         // TODO: watch for changes using inotify and read the config only when needed
         let config = Config::new()?;
+        let sep: &str = config.separator();
 
         let workspaces = wm.get_windows_in_each_workspace()?;
         for (name, windows) in workspaces {
             let new_name = pretty_windows(&config, &windows);
             let num = name
-                .split(':')
+                .split(sep)
                 .next()
                 .context("Unexpected workspace name")?;
             if new_name.is_empty() {
                 wm.rename_workspace(&name, num)?;
             } else {
-                wm.rename_workspace(&name, &format!("{num}: {new_name}"))?;
+                wm.rename_workspace(&name, &format!("{num}{sep}{new_name}"))?;
             }
         }
 
